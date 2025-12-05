@@ -2,23 +2,26 @@ import os
 import pickle
 import numpy as np
 import requests
-import json
 from flask import Flask, render_template, request, jsonify
 
 # --- ROBUST IMPORT: AI LIBRARY ---
 try:
     import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
-    print("⚠️ Warning: google-generativeai not installed. AI Chat will be disabled.")
+    print("⚠️ Warning: google-generativeai not installed.")
 
-app = Flask(__name__)
+# --- PATH CONFIGURATION (CRITICAL FIX) ---
+# We are in /api, so we go UP one level ('..') to find templates, static, and models
+current_dir = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.join(current_dir, '..')
+MODEL_DIR = os.path.join(ROOT_DIR, 'models')
 
-# --- CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, 'models')
+# Initialize Flask with explicit folder paths
+app = Flask(__name__, 
+            template_folder=os.path.join(ROOT_DIR, 'templates'), 
+            static_folder=os.path.join(ROOT_DIR, 'static'))
 
 # API Keys
 GENAI_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCl1gjiOzdHKsJLpKQHblX2OqHWBE_i-ng") 
@@ -34,6 +37,7 @@ def load_file(filename):
         with open(path, 'rb') as f:
             return pickle.load(f)
     except Exception as e:
+        print(f"Error loading {filename}: {e}")
         return None
 
 model = load_file('model.pkl')
@@ -64,56 +68,36 @@ def predict():
             result = label_encoder.inverse_transform(prediction_index)[0]
             return jsonify({'success': True, 'result': result})
         else:
-            return jsonify({'success': False, 'error': "AI Model files are missing from the server."})
+            return jsonify({'success': False, 'error': "AI Models are loading..."})
 
     except Exception as e:
-        return jsonify({'success': False, 'error': f"Input Error: {str(e)}"})
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/ask-ai', methods=['POST'])
 def ask_ai():
-    if not HAS_GENAI: return jsonify({'answer': "⚠️ AI Library Missing."})
-    if not GENAI_KEY: return jsonify({'answer': "⚠️ API Key Missing."})
+    if not HAS_GENAI: return jsonify({'answer': "AI is currently offline."})
     
     data = request.json
     user_question = data.get('question', '')
-    image_data = data.get('image') # Base64 string if present
+    image_data = data.get('image')
     
     try:
         gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+        inputs = ["You are 'AgriVision Soil Doctor'. Answer concisely.", f"Question: {user_question}"]
         
-        # Prepare inputs
-        inputs = []
-        
-        # System Prompt logic embedded in user prompt for better context
-        prompt_text = (
-            "You are 'AgriVision Soil Doctor', an expert agricultural AI. "
-            "Analyze the crop/soil images if provided. Answer farming questions concisely. "
-            f"User Question: {user_question}"
-        )
-        inputs.append(prompt_text)
-
         if image_data:
-            # Create the image part structure for Gemini
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": image_data
-            }
-            inputs.append(image_part)
+            inputs.append({"mime_type": "image/jpeg", "data": image_data})
 
         response = gemini_model.generate_content(inputs)
         return jsonify({'answer': response.text})
     except Exception as e:
-        print(f"AI Error: {e}")
-        return jsonify({'answer': "I'm having trouble analyzing that. Please try again."})
+        return jsonify({'answer': "Connection error. Please try again."})
 
 @app.route('/get-weather', methods=['POST'])
 def get_weather():
-    """Fetches real weather + Rainfall Probability"""
     try:
         data = request.json
-        lat = data.get('lat')
-        lon = data.get('lon')
-        city = data.get('city')
+        lat, lon, city = data.get('lat'), data.get('lon'), data.get('city')
         
         if city:
             url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={WEATHER_API_KEY}&units=metric"
@@ -121,11 +105,9 @@ def get_weather():
             url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
         
         response = requests.get(url)
-        weather_data = response.json()
+        if response.status_code != 200: return jsonify({'success': False})
         
-        if response.status_code != 200:
-            return jsonify({'success': False, 'error': weather_data.get('message', 'Weather API Error')})
-
+        weather_data = response.json()
         forecast_list = []
         seen_dates = set()
         
@@ -133,35 +115,22 @@ def get_weather():
             date_txt = item['dt_txt'].split(' ')[0]
             if date_txt not in seen_dates:
                 seen_dates.add(date_txt)
-                rain_chance = int(item.get('pop', 0) * 100)
-                
                 forecast_list.append({
                     'day': date_txt,
                     'temp': round(item['main']['temp']),
                     'desc': item['weather'][0]['main'],
                     'icon_code': item['weather'][0]['icon'],
-                    'rain_chance': rain_chance
+                    'rain_chance': int(item.get('pop', 0) * 100)
                 })
                 if len(forecast_list) >= 4: break
         
         current = weather_data['list'][0]
-        current_pop = int(current.get('pop', 0) * 100)
-        
-        current_details = {
-            'humidity': current['main']['humidity'],
-            'wind_speed': current['wind']['speed'],
-            'pressure': current['main']['pressure'],
-            'rain_chance': current_pop
-        }
-        
         return jsonify({
-            'success': True, 
-            'city': weather_data['city']['name'], 
-            'forecast': forecast_list,
-            'current': current_details
+            'success': True, 'city': weather_data['city']['name'], 'forecast': forecast_list,
+            'current': {'humidity': current['main']['humidity'], 'wind_speed': current['wind']['speed'], 'pressure': current['main']['pressure'], 'rain_chance': int(current.get('pop', 0) * 100)}
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-if __name__ == "__main__":
-    app.run(debug=True)
+# Vercel Serverless Entry Point
+app.debug = True
