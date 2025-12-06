@@ -55,6 +55,7 @@ def load_file(filename):
     return None
 
 # Load models at startup
+print("🌱 AgriSense Server Starting...") # Force Git Update
 model = load_file('model.pkl')
 label_encoder = load_file('label_encoder.pkl')
 
